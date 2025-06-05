@@ -38,8 +38,10 @@ urlpatterns = [
     path('warehouse/create', views.create_warehouse, name='create_warehouse'),
     path('warehouse/', views.warehouse_list, name='warehouse-list'),
     path('warehouse/<int:warehouse_id>/', views.warehouse_detail, name='warehouse-detail'),
-    path('warehouse/<int:warehouse_id>/add-stock/', views.add_stock_to_warehouse, name='add-stock'),
-    path('stockitem/<int:product_id>/', views.update_stock_item, name='update-stock-item'),
+    path('stockitem/', views.update_stock_item, name='update-stock-item'),
+    
+    
+    path('sync-stock/', views.sync_stock, name='sync_stock'),
     
     
 ]

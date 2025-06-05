@@ -1,6 +1,7 @@
 from decimal import Decimal
+from urllib import response
 from django.forms import ValidationError
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 import json
 from django.http import HttpResponseBadRequest, JsonResponse, HttpResponseNotAllowed
 from django.views.decorators.csrf import csrf_exempt
@@ -27,6 +28,10 @@ from django.core.exceptions import ValidationError
 
 from datetime import datetime
 from django.utils.text import slugify
+from rest_framework.decorators import api_view
+from rest_framework import status
+from rest_framework.response import Response
+
 
 def get_csrf_token(request):
     return JsonResponse({'csrfToken': get_token(request)})
@@ -810,31 +815,47 @@ def add_stock_to_warehouse(request, warehouse_id):
     })
     
 @csrf_exempt
-def update_stock_item(request, product_id):
-    if request.method == 'PATCH':
-        try:
-            payload = json.loads(request.body)
-            print("Payload received:", payload)  # 👈 Add this for debugging
+def update_stock_item(request):
+    if request.method != 'PATCH':
+        return HttpResponseNotAllowed(['PATCH'])
 
-            warehouse_id = payload.get("warehouse_id")
-            quantity = payload.get("quantity")
+    try:
+        payload = json.loads(request.body)
+        print("Payload received:", payload)
 
-            if warehouse_id is None or quantity is None:
-                return JsonResponse({"error": "Missing warehouse_id or quantity"}, status=400)
+        warehouse_id = payload.get("warehouse_id")
+        quantity = payload.get("quantity")
+        designation = payload.get("designation")
+        variant_code = payload.get("variant_code")  # optional for simple products
 
-            stock_item = StockItem.objects.get(product_id=product_id, warehouse_id=warehouse_id)
-            stock_item.quantity = quantity
-            stock_item.save()
-            return JsonResponse({"success": True, "new_quantity": stock_item.quantity})
+        # Validate required fields
+        if None in (warehouse_id, quantity, designation):
+            return JsonResponse({"error": "Missing warehouse_id, designation or quantity"}, status=400)
 
-        except StockItem.DoesNotExist:
-            return JsonResponse({"error": "Stock item not found"}, status=404)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return JsonResponse({"error": str(e)}, status=400)
+        # Normalize designation
+        designation = designation.strip().lower()
 
-    return HttpResponseNotAllowed(['PATCH'])
+        if variant_code:
+            variant_code = variant_code.strip().lower()
+            product = Product.objects.get(designation__iexact=designation, variants__code__iexact=variant_code)
+        else:
+            product = Product.objects.get(designation__iexact=designation, variants__isnull=True)
+
+        # Get stock item
+        stock_item = StockItem.objects.get(product=product, warehouse_id=warehouse_id)
+        stock_item.quantity = quantity
+        stock_item.save()
+
+        return JsonResponse({"success": True, "new_quantity": stock_item.quantity})
+
+    except Product.DoesNotExist:
+        return JsonResponse({"error": "Product not found"}, status=404)
+    except StockItem.DoesNotExist:
+        return JsonResponse({"error": "Stock item not found"}, status=404)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({"error": str(e)}, status=400)
 
 @csrf_exempt
 def distribute_product_to_warehouses(product, total_quantity):
@@ -884,3 +905,45 @@ def distribute_stock_to_all_warehouses(request):
         result.append(entry)
 
     return JsonResponse(result, safe=False)
+
+@api_view(['POST'])
+def sync_stock(request):
+    data = request.data
+    warehouse_id = data.get('warehouse_id')
+    products = data.get('products', [])
+
+    if not warehouse_id or not products:
+        return Response({'error': 'Missing warehouse or product data'}, status=status.HTTP_400_BAD_REQUEST)
+
+    warehouse = get_object_or_404(Warehouse, id=warehouse_id)
+
+    for item in products:
+        product_id = item.get('product_id')
+        quantity = item.get('quantity')
+        is_variant = item.get('is_variant', False)
+        variant_code = item.get('variant_code')
+
+        if is_variant and variant_code:
+            try:
+                variant = Variant.objects.get(code=variant_code)
+                variant.stock = quantity
+                variant.save()
+            except Variant.DoesNotExist:
+                continue
+        else:
+            try:
+                product = Product.objects.get(id=product_id)
+
+                # Create or update StockItem for the warehouse
+                stock_item, created = StockItem.objects.get_or_create(
+                    warehouse=warehouse,
+                    product=product,
+                    defaults={'quantity': quantity}
+                )
+                if not created:
+                    stock_item.quantity = quantity
+                    stock_item.save()
+            except Product.DoesNotExist:
+                continue
+
+    return Response({'message': 'Stock synchronized successfully'}, status=status.HTTP_200_OK)
