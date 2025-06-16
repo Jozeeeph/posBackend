@@ -1,31 +1,29 @@
 from decimal import Decimal
-from urllib import response
+import re
 from django.forms import ValidationError
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404
 import json
 from django.http import HttpResponseBadRequest, JsonResponse, HttpResponseNotAllowed
 from django.views.decorators.csrf import csrf_exempt
+import openpyxl
 from .models import Product, Category, StockItem, SubCategory, Variant, Warehouse
 from django.forms.models import model_to_dict
 from django.utils.text import slugify
 from django.middleware.csrf import get_token
-# Create your views here.
 from django.db import transaction
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
+from django.views.decorators.http import require_GET
 from decimal import Decimal
 import json
 from .models import Product, Variant, Category, SubCategory
-
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse, HttpResponseNotAllowed
 from django.forms.models import model_to_dict
 import json
 from decimal import Decimal
 from django.core.exceptions import ValidationError
-
 from datetime import datetime
 from django.utils.text import slugify
 from rest_framework.decorators import api_view
@@ -170,128 +168,119 @@ def createProduct(request):
 
 
 
-
 @csrf_exempt
 def import_products(request):
-    if request.method != "POST":
-        return JsonResponse({"error": "Only POST method is allowed"}, status=405)
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Only POST method is allowed'}, status=405)
+
+    if 'file' not in request.FILES:
+        return JsonResponse({'error': 'No file uploaded'}, status=400)
+
+    file = request.FILES['file']
 
     try:
-        # 1. Parse input data
-        try:
-            data = json.loads(request.body)
-            rows_data = data.get('rows', [])
-        except json.JSONDecodeError as e:
-            return JsonResponse({'error': f'Invalid JSON data: {str(e)}'}, status=400)
-        
-        if not rows_data:
-            return JsonResponse({"error": "No data provided"}, status=400)
+        wb = openpyxl.load_workbook(file)
+        sheet = wb.active
 
-        # 2. Group rows by product reference
+        headers = [cell.value for cell in sheet[1]]
+        rows_data = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            row_dict = dict(zip(headers, row))
+            rows_data.append(row_dict)
+
+        # Now process the rows as products + variants
+        results = {
+            'created_products': 0,
+            'created_variants': 0,
+            'errors': [],
+            'total_attempted': len(rows_data)
+        }
+
+        # Group by REFERENCE
         products_dict = {}
         for row in rows_data:
             ref = row.get('REFERENCE')
             if not ref:
                 continue
-                
+
             if ref not in products_dict:
                 products_dict[ref] = {
                     'main_data': row,
                     'variants': []
                 }
-            
-            # Add as variant if it's a variant row
+            permanent_row = []
             if row.get('SIMPLEPRODUCT') in ['FALSE', False] and row.get('VARIANTNAME'):
-                products_dict[ref]['variants'].append(row)
+                permanent_row.append(row)
 
-        # 3. Initialize counters
-        results = {
-            'created_products': 0,
-            'created_variants': 0,
-            'errors': [],
-            'total_attempted': len(products_dict)
-        }
+            products_dict[ref]['variants'].extend(permanent_row)
 
-        # 4. Process in transaction
+
         with transaction.atomic():
-            for index, (ref, product_data) in enumerate(products_dict.items(), start=1):
+            for index, (ref, data) in enumerate(products_dict.items(), start=1):
                 try:
-                    main_data = product_data['main_data']
-                    
-                    # Validate required fields
-                    if not main_data.get('PRODUCTNAME'):
-                        raise ValidationError("Product name is required")
-                    
-                    # Process category
-                    category_name = main_data.get('CATEGORY', 'Default').strip()
-                    category, _ = Category.objects.get_or_create(
-                        name=category_name,
-                        defaults={'image_path': ''}
-                    )
+                    main = data['main_data']
 
-                    # Convert numeric values
-                    def to_decimal(value, default=Decimal('0')):
-                        if value in [None, '']:
+                    category_name = main.get('CATEGORY', 'Default').strip()
+                    category, _ = Category.objects.get_or_create(name=category_name)
+
+                    def to_decimal(val, default=Decimal('0')):
+                        if val in [None, '']:
                             return default
-                        if isinstance(value, str):
-                            value = value.replace(',', '.')
                         try:
-                            return Decimal(str(value))
+                            return Decimal(str(val).replace(',', '.'))
                         except:
                             return default
 
-                    # Create product
                     product = Product(
                         code=ref,
-                        designation=main_data['PRODUCTNAME'].strip(),
-                        description=main_data.get('DESCRIPTION', '').strip() or None,
-                        stock=int(to_decimal(main_data.get('QUANTITY', 0))),
-                        prix_ht=to_decimal(main_data.get('SELLPRICETAXEXCLUDE')),
-                        taxe=to_decimal(main_data.get('VAT')),
-                        prix_ttc=to_decimal(main_data.get('SELLPRICETAXINCLUDE')),
+                        designation=main['PRODUCTNAME'].strip(),
+                        description=main.get('DESCRIPTION', '').strip() or None,
+                        stock=int(to_decimal(main.get('QUANTITY'))),
+                        prix_ht=to_decimal(main.get('SELLPRICETAXEXCLUDE')),
+                        taxe=to_decimal(main.get('VAT')),
+                        prix_ttc=to_decimal(main.get('SELLPRICETAXINCLUDE')),
                         category=category,
-                        brand=main_data.get('BRAND', '').strip()[:100] or None,
-                        has_variants=main_data.get('SIMPLEPRODUCT') in ['FALSE', False],
-                        sellable=main_data.get('SELLABLE') in ['TRUE', True],
+                        brand=main.get('BRAND', '').strip()[:100] or None,
+                        has_variants=main.get('SIMPLEPRODUCT') in ['FALSE', False],
+                        sellable=main.get('SELLABLE') in ['TRUE', True],
                         status='in_stock',
-                        image_path=main_data.get('IMAGE', '')
+                        image=main.get('IMAGE', ''),
+                        marge=to_decimal(main.get('MARGE', 0))
                     )
-                    
-                    product.full_clean()
+                    print("***************************")
+
                     product.save()
                     results['created_products'] += 1
-
-                    # Handle variants
-                    if product.has_variants and product_data['variants']:
-                        for variant_data in product_data['variants']:
+                    print("Product created:", product.designation)
+                    if product.has_variants:
+                        for var in data['variants']:
+                            print("***************************")
+                            print(var)
                             variant = Variant(
                                 product=product,
-                                combination_name=variant_data['VARIANTNAME'].strip(),
-                                price=to_decimal(variant_data.get('SELLPRICETAXINCLUDE')),
-                                price_impact=to_decimal(variant_data.get('IMPACTPRICE')),
-                                stock=int(to_decimal(variant_data.get('QUANTITYVARIANT', 0))),
-                                default_variant=variant_data.get('DEFAULTVARIANT') in ['TRUE', True],
-                                image_path=variant_data.get('VARIANTIMAGE', '')
+                                code = var.get('VARIANTCODE', ''),
+                                combination_name=var['VARIANTNAME'],
+                                price=to_decimal(var.get('SELLPRICETAXINCLUDE')),
+                                price_impact=to_decimal(var.get('IMPACTPRICE')),
+                                stock=int(to_decimal(var.get('QUANTITYVARIANT'))),
+                                default_variant=var.get('DEFAULTVARIANT') in ['TRUE', True],
+                              
                             )
-                            variant.full_clean()
+                            
                             variant.save()
                             results['created_variants'] += 1
-
+                            print("Variant created:", variant.combination_name)
                 except Exception as e:
                     results['errors'].append({
                         'line': index,
-                        'product': main_data.get('PRODUCTNAME', 'Unknown'),
+                        'product': main.get('PRODUCTNAME', 'Unknown'),
                         'error': str(e)
                     })
-                    continue
 
         return JsonResponse({'success': True, **results}, status=201)
 
     except Exception as e:
-        return JsonResponse({
-            'success': False,
-            'error': f"Server error: {str(e)}"
-        }, status=500)
+        return JsonResponse({'error': f'Error processing file: {str(e)}'}, status=500)
     
 
 def getProducts(request):
@@ -322,6 +311,7 @@ def getProducts(request):
                 if product.has_variants:
                     data['variants'] = [{
                         'id': v.id,
+                        'code': v.code,
                         'combination_name': v.combination_name,
                         'price': float(v.price),
                         'price_impact': float(v.price_impact),
@@ -776,6 +766,15 @@ def warehouse_detail(request, warehouse_id):
 
     return HttpResponseNotAllowed(['PATCH'])
 
+@csrf_exempt
+@api_view(['DELETE'])
+def deleteWarehouse(request, pk):
+    try:
+        warehouse = Warehouse.objects.get(pk=pk)
+        warehouse.delete()
+        return Response({"message": "Warehouse deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
+    except Warehouse.DoesNotExist:
+        return Response({"error": "Warehouse not found"}, status=status.HTTP_404_NOT_FOUND)
 
 @csrf_exempt
 def add_stock_to_warehouse(request, warehouse_id):
@@ -794,8 +793,9 @@ def add_stock_to_warehouse(request, warehouse_id):
 
     product_id = payload.get("product_id")
     quantity = payload.get("quantity")
+    variant_code = payload.get("variant_code")  # optional
 
-    if not product_id or quantity is None:
+    if product_id is None or quantity is None:
         return HttpResponseBadRequest("Fields 'product_id' and 'quantity' are required")
 
     try:
@@ -803,16 +803,34 @@ def add_stock_to_warehouse(request, warehouse_id):
     except Product.DoesNotExist:
         return JsonResponse({"error": "Product not found"}, status=404)
 
-    stock_item, created = StockItem.objects.get_or_create(warehouse=warehouse, product=product)
-    stock_item.quantity = quantity
-    stock_item.save()
+    variant = None
+    if variant_code:
+        variant = product.variants.filter(code__iexact=variant_code.strip()).first()
+        if not variant:
+            return JsonResponse({"error": "Variant not found for the given product"}, status=404)
+
+    # StockItem: uniqueness defined by (warehouse, product, variant)
+    stock_item, created = StockItem.objects.get_or_create(
+        warehouse=warehouse,
+        product=product,
+        variant=variant,
+        defaults={"quantity": quantity}
+    )
+
+    if not created:
+        # If already exists, update quantity (you can change this to += if you prefer increment)
+        stock_item.quantity = quantity
+        stock_item.save()
 
     return JsonResponse({
+        "success": True,
         "warehouse": warehouse.name,
-        "product": product.designation,  # updated from product.name to match your JSON
+        "product": product.designation,
+        "variant": variant.code if variant else None,
         "quantity": stock_item.quantity,
         "updated": not created
     })
+
     
 @csrf_exempt
 def update_stock_item(request):
@@ -826,27 +844,45 @@ def update_stock_item(request):
         warehouse_id = payload.get("warehouse_id")
         quantity = payload.get("quantity")
         designation = payload.get("designation")
-        variant_code = payload.get("variant_code")  # optional for simple products
+        variant_code = payload.get("variant_code")
 
-        # Validate required fields
         if None in (warehouse_id, quantity, designation):
             return JsonResponse({"error": "Missing warehouse_id, designation or quantity"}, status=400)
 
-        # Normalize designation
-        designation = designation.strip().lower()
+        # Nettoyage du nom du produit
+        clean_name = re.sub(r"\s*\(.*?\)", "", designation).strip().lower()
+        print(f"Cleaned designation: {clean_name}, Variant code: {variant_code}")
+
+        variant = None
 
         if variant_code:
             variant_code = variant_code.strip().lower()
-            product = Product.objects.get(designation__iexact=designation, variants__code__iexact=variant_code)
+            product = Product.objects.get(designation__iexact=clean_name, variants__code__iexact=variant_code)
+            variant = product.variants.filter(code__iexact=variant_code).first()
+            if not variant:
+                return JsonResponse({"error": "Variant not found"}, status=404)
         else:
-            product = Product.objects.get(designation__iexact=designation, variants__isnull=True)
+            product = Product.objects.get(designation__iexact=clean_name, variants__isnull=True)
 
-        # Get stock item
-        stock_item = StockItem.objects.get(product=product, warehouse_id=warehouse_id)
-        stock_item.quantity = quantity
-        stock_item.save()
+        stock_item, created = StockItem.objects.get_or_create(
+            product=product,
+            variant=variant,
+            warehouse_id=warehouse_id,
+            defaults={"quantity": quantity}
+        )
+        print(f"Stock item found: {stock_item.quantity}, Created: {created}")
 
-        return JsonResponse({"success": True, "new_quantity": stock_item.quantity})
+        if not created:
+            stock_item.quantity = quantity
+            stock_item.save()
+
+        return JsonResponse({
+            "success": True,
+            "product": product.designation,
+            "variant": variant.code if variant else None,
+            "new_quantity": stock_item.quantity,
+            "created": created
+        })
 
     except Product.DoesNotExist:
         return JsonResponse({"error": "Product not found"}, status=404)
@@ -856,6 +892,8 @@ def update_stock_item(request):
         import traceback
         traceback.print_exc()
         return JsonResponse({"error": str(e)}, status=400)
+
+    
 
 @csrf_exempt
 def distribute_product_to_warehouses(product, total_quantity):
@@ -903,7 +941,6 @@ def distribute_stock_to_all_warehouses(request):
             })
 
         result.append(entry)
-
     return JsonResponse(result, safe=False)
 
 @api_view(['POST'])
@@ -947,3 +984,23 @@ def sync_stock(request):
                 continue
 
     return Response({'message': 'Stock synchronized successfully'}, status=status.HTTP_200_OK)
+
+
+@require_GET
+def stock_items_by_warehouse(request):
+    warehouses = {}
+    stock_items = StockItem.objects.select_related('warehouse', 'product', 'variant')
+
+    for item in stock_items:
+        warehouse_name = item.warehouse.name
+        if warehouse_name not in warehouses:
+            warehouses[warehouse_name] = []
+
+        warehouses[warehouse_name].append({
+            "product_id": item.product.id,
+            "product_name": item.product.designation,
+            "variant_code": item.variant.code if item.variant else None,
+            "quantity": item.quantity
+        })
+
+    return JsonResponse(warehouses)

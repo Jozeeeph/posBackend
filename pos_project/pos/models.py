@@ -197,6 +197,7 @@ class Warehouse(models.Model):
 class StockItem(models.Model):
     warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='stock')
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='stock_items')
+    variant = models.ForeignKey(Variant, on_delete=models.CASCADE, related_name='stock_items', null=True, blank=True)
     quantity = models.PositiveIntegerField(default=0)
 
     def save(self, *args, **kwargs):
