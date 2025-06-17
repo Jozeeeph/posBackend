@@ -365,6 +365,30 @@ def deleteProduct(request,id):
     return HttpResponseNotAllowed(['DELETE'])
 
 
+@require_GET
+def get_product_warehouse_stocks(request, product_id):
+    try:
+        product = Product.objects.get(pk=product_id)
+
+        # Only allow this for products without variants
+        if product.has_variants:
+            return JsonResponse({'error': 'This product has variants.'}, status=400)
+
+        stock_items = StockItem.objects.filter(product=product, variant__isnull=True)
+
+        data = [
+            {
+                'warehouse': item.warehouse.name,
+                'warehouse_id': item.warehouse.id,
+                'quantity': item.quantity,
+                'percentage': item.warehouse.percentage,
+            }
+            for item in stock_items
+        ]
+        return JsonResponse(data, safe=False)
+    except Product.DoesNotExist:
+        return JsonResponse({'error': 'Product not found.'}, status=404)
+
 #Category
 @csrf_exempt
 def createCategory(request):
@@ -601,6 +625,27 @@ def deleteVariant(request):
     return HttpResponseNotAllowed(['DELETE'])
 
 
+
+@require_GET
+def get_variant_warehouse_stocks(request, variant_id):
+    try:
+        variant = Variant.objects.get(pk=variant_id)
+
+        stock_items = StockItem.objects.filter(variant=variant)
+
+        data = [
+            {
+                'warehouse': item.warehouse.name,
+                'warehouse_id': item.warehouse.id,
+                'quantity': item.quantity,
+                'percentage': item.warehouse.percentage,
+            }
+            for item in stock_items
+        ]
+        return JsonResponse(data, safe=False)
+    except Variant.DoesNotExist:
+        return JsonResponse({'error': 'Variant not found.'}, status=404)
+
 #Stock :
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -743,7 +788,6 @@ def warehouse_list(request):
 
     return HttpResponseNotAllowed(['GET', 'POST', 'PATCH'])
 
-    return HttpResponseNotAllowed(['GET', 'POST'])
 
 @csrf_exempt
 def warehouse_detail(request, warehouse_id):
@@ -943,6 +987,7 @@ def distribute_stock_to_all_warehouses(request):
         result.append(entry)
     return JsonResponse(result, safe=False)
 
+
 @api_view(['POST'])
 def sync_stock(request):
     data = request.data
@@ -1004,3 +1049,26 @@ def stock_items_by_warehouse(request):
         })
 
     return JsonResponse(warehouses)
+
+
+@api_view(['GET'])
+def warehouse_stats(request):
+    warehouses = Warehouse.objects.all()
+    response_data = []
+
+    for warehouse in warehouses:
+        stock_items = StockItem.objects.filter(warehouse=warehouse)
+
+        total_quantity = sum(item.quantity for item in stock_items)
+        unique_products = stock_items.values('product').distinct().count()
+        num_variants = stock_items.filter(variant__isnull=True).values('variant').count()
+
+        response_data.append({
+            'name': warehouse.name,
+            'percentage': warehouse.percentage,
+            'total_quantity': total_quantity,
+            'unique_products': unique_products,
+            'num_variants': num_variants,
+        })
+
+    return Response(response_data)

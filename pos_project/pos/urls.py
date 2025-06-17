@@ -10,9 +10,7 @@ urlpatterns = [
     path('product/update/<int:id>', views.updateProduct),
     path('product/delete', views.deleteAllProducts),
     path('product/import', views.import_products),
-    #path('product/<int:id>/warehouse-stocks/', views.),
-    
-    
+        
     #Category
     path('category/add', views.createCategory),
     path('category/get', views.getCategories),
@@ -44,10 +42,11 @@ urlpatterns = [
     path('stockitem/', views.update_stock_item, name='update-stock-item'),
     path('warehouse/<int:warehouse_id>/add-stock/', views.add_stock_to_warehouse, name='update-stock-item'),
     path('stock-items/by-warehouse/', views.stock_items_by_warehouse, name='stock_items_by_warehouse'),
+    path('warehouse/stats/', views.warehouse_stats, name='warehouse-stats'),
 
     
-    
-    
+    path('product/<int:product_id>/warehouse-stocks/', views.get_product_warehouse_stocks),
+    path('variant/<int:variant_id>/warehouse-stocks/', views.get_variant_warehouse_stocks),
     path('sync-stock/', views.sync_stock, name='sync_stock'),
     
     
